@@ -1,0 +1,9 @@
+[project]
+name = "solver"
+version = "2.0.0"
+description = "Stand-in for the solver package"
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.13"]
+build-backend = "uv_build"
