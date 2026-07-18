@@ -4,7 +4,7 @@ from importlib.metadata import version
 
 ROUNDING = "rounds HALF-UP (perf rewrite) + audit log"
 
-CART_NOTE = "BUG: off-by-one on empty carts"
+CART_NOTE = "fixed empty carts"
 
 
 def describe() -> str:
