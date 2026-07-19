@@ -96,6 +96,10 @@ jobs:
             echo "existing open bot PR #$OPEN_PR — updating its branch"
           else
             git checkout -B "$BRANCH"
+            # A bot PR closed WITHOUT merging can leave its old branch behind;
+            # our fresh history would not fast-forward onto it. The branch is
+            # ephemeral bot property — clear any leftover before pushing.
+            git push origin ":$BRANCH" 2>/dev/null || true
           fi
 
           # Compare every consumer pin against the newest published version.
