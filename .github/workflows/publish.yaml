@@ -1,15 +1,25 @@
-# publish — build common packages into the wheel registry (the `registry` branch).
+# publish — mint versions, then build wheels into the registry branch.
 #
-# Mirrors the real setup: a push to dev that touches common/** triggers a
-# publish. For each package we read `version` from its pyproject and check the
-# registry. The registry is IMMUTABLE:
+# Act 1 shipped the bottom job only: a push to dev touching common/** builds
+# any wheel whose version isn't in the registry yet. IMMUTABLE: same version
+# = no republish. Only a version BUMP produces a new wheel — and remembering
+# to bump was a human job.
 #
-#     same version = no republish.
+# Act 1.5 adds the `auto-bump` job in front (real-world category:
+# semantic-release / release-please — tools that mint the next version from
+# the commits that landed, so no human ever "remembers to bump"). If common
+# source lands on dev WITHOUT a version change, auto-bump computes the next
+# patch version, commits "bot(bump): <pkg> X.Y.Z" back to dev, and the
+# publish job builds from that bumped commit.
 #
-# Only a version BUMP produces a new wheel. Note what this workflow does NOT
-# do: it never touches consumer pins. Publishing a wheel changes nothing about
-# what any environment runs — that requires a second, human-made change (the
-# re-pin). This is the "two-PR dance" of exercise 1.1.
+# WHY ONE WORKFLOW, TWO JOBS (and not a separate bump workflow): pushes made
+# with the default GITHUB_TOKEN do NOT trigger other workflows (GitHub
+# suppresses them to prevent infinite loops). A standalone bump workflow
+# would push the bump… and publish would never fire. Living in the same
+# workflow sidesteps that: the publish job simply checks out the bumped SHA
+# that auto-bump just pushed. (The same suppression rule is the star of the
+# repin workflow's teachable — see repin.yaml.)
+
 name: publish
 
 on:
@@ -18,23 +28,102 @@ on:
     paths: ["common/**"]     # ...and only when shared-package source changed
 
 permissions:
-  contents: write            # we commit wheels to the `registry` branch
+  contents: write            # bump commits to dev + wheel commits to registry
 
 # The registry branch is a single shared resource: if two publishes ran at
 # once, the second push would be rejected (non-fast-forward). Serialize them.
+# (hotfix-pinned.yaml uses the SAME group name — it also writes the registry.)
 concurrency:
   group: registry-branch
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------- auto-bump
+  # Decides, per package: does this push contain source changes that are
+  # stranded under an already-published version? If yes, mint the next patch.
+  auto-bump:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.bump.outputs.sha }}   # dev HEAD after any bump commits
+    steps:
+      # Full history: we diff against the pre-push SHA to see what landed.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The registry tells us which versions already exist ("published").
+      - uses: actions/checkout@v4
+        with:
+          ref: registry
+          path: .registry-branch
+
+      - name: bump any package whose source changed without a version change
+        id: bump
+        run: |
+          # What did this push actually change? Compare against the pre-push
+          # SHA GitHub hands us. (All-zero SHA = branch creation; fall back.)
+          BASE="${{ github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            BASE="HEAD^"
+          fi
+
+          BUMPED=0
+          echo "## auto-bump (dev @ $(git rev-parse --short HEAD))" >> "$GITHUB_STEP_SUMMARY"
+
+          for PKG in qb solver; do
+            # Nothing under this package changed in this push -> not our beat.
+            git diff --quiet "$BASE" HEAD -- "common/$PKG" && continue
+
+            # LOOP GUARD #1: if this push already touched the version line —
+            # a human bumped, or this IS a previous bot(bump) commit — the
+            # version was minted deliberately. Never second-guess it, never
+            # bump on top of a bump.
+            if git diff "$BASE" HEAD -- "common/$PKG/pyproject.toml" | grep -q '^+version'; then
+              echo "- $PKG: version line changed in this push — a human (or the bot) already minted it. No action." >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            VERSION="$(grep -m1 '^version' "common/$PKG/pyproject.toml" | cut -d'"' -f2)"
+
+            # Version not published yet? Then it's a fresh number and the
+            # publish job below will ship it — nothing stranded, no bump.
+            if [ ! -e ".registry-branch/$PKG-$VERSION-py3-none-any.whl" ]; then
+              echo "- $PKG: $VERSION is not published yet — publish will pick it up as-is." >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            # Source changed + version untouched + version already published
+            # = the exact human mistake this job exists to erase. Mint patch+1.
+            NEW="${VERSION%.*}.$(( ${VERSION##*.} + 1 ))"
+            sed -i "s/^version = \"$VERSION\"/version = \"$NEW\"/" "common/$PKG/pyproject.toml"
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "bot(bump): $PKG $NEW"
+            echo "- :robot: **$PKG: source changed under already-published $VERSION — auto-bumped to $NEW**" >> "$GITHUB_STEP_SUMMARY"
+            BUMPED=1
+          done
+
+          # LOOP GUARD #2 (belt to guard #1's braces): this push uses
+          # GITHUB_TOKEN, so it triggers no workflows at all — the bump
+          # cannot re-enter this workflow even if guard #1 had a hole.
+          if [ "$BUMPED" = 1 ]; then
+            git push origin HEAD:dev
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------ publish
+  # Unchanged Act-1 logic, except it builds from auto-bump's output SHA (dev
+  # HEAD *including* any bump commit just pushed).
   publish:
+    needs: auto-bump
     runs-on: ubuntu-latest
     steps:
-      # The pushed dev tree — source of truth for package versions + code.
+      # The (possibly bot-bumped) dev tree — source of truth for versions.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.auto-bump.outputs.sha }}
 
-      # The registry, checked out as a plain subdirectory. This is the CI
-      # equivalent of publish.sh's ../registry.
+      # The registry, checked out as a plain subdirectory.
       - uses: actions/checkout@v4
         with:
           ref: registry
@@ -47,7 +136,7 @@ jobs:
           # Absolute path: uv resolves a relative --out-dir against the
           # package being built, not the workflow's working directory.
           REG="$GITHUB_WORKSPACE/.registry-branch"
-          echo "## publish (dev @ ${GITHUB_SHA::7})" >> "$GITHUB_STEP_SUMMARY"
+          echo "## publish (dev @ $(git rev-parse --short HEAD))" >> "$GITHUB_STEP_SUMMARY"
 
           for PKG in qb solver; do
             VERSION="$(grep -m1 '^version' "common/$PKG/pyproject.toml" | cut -d'"' -f2)"
