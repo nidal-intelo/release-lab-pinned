@@ -158,7 +158,31 @@ jobs:
             [ -e "$REG/$WHEEL" ] || { echo "BUILD FAILED: $WHEEL not in registry checkout" >&2; exit 1; }
             echo "published: $WHEEL"
             echo "- :package: **published \`$WHEEL\`** to the registry branch" >> "$GITHUB_STEP_SUMMARY"
+            # Remember what we published — the manifest step below records it.
+            echo "$PKG $VERSION $WHEEL" >> "$RUNNER_TEMP/published.txt"
           done
+
+      # ---- provenance manifest -------------------------------------------
+      # manifest.json (on the registry branch) maps every wheel back to the
+      # exact dev commit it was built from, plus the run that built it. This
+      # is the "which commit does production actually run?" question answered
+      # in advance — the archaeology that a hotfix otherwise starts with
+      # (git log spelunking through pyproject history). hotfix-pinned.yaml
+      # reads this file instead of a human reading `git log`.
+      - name: record provenance in manifest.json
+        run: |
+          [ -s "$RUNNER_TEMP/published.txt" ] || { echo "nothing published — manifest untouched"; exit 0; }
+          cd .registry-branch
+          [ -s manifest.json ] || echo '{}' > manifest.json
+          SHA="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          while read -r PKG VERSION WHEEL; do
+            jq --arg w "$WHEEL" --arg p "$PKG" --arg v "$VERSION" \
+               --arg sha "$SHA" --arg url "$RUN_URL" \
+               '.[$w] = {package: $p, version: $v, source_commit_sha: $sha, dev_run_url: $url}' \
+               manifest.json > manifest.json.tmp && mv manifest.json.tmp manifest.json
+            echo "- :scroll: manifest: \`$WHEEL\` <- \`${SHA:0:7}\`" >> "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/published.txt"
 
       - name: commit new wheels to the registry branch (if any)
         run: |
