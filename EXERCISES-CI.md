@@ -249,3 +249,328 @@ The CI automated the *labor* of phase 1 (build, copy, install, record) and
 none of the *bookkeeping* (which versions exist, who pins what, is the rollout
 complete). Every summary in this act was green except the one that protected
 you. Keep that asymmetry in mind for Act 2.
+
+---
+
+# Act 1.5 — the engineering round
+
+Act 1 ended on an asymmetry: the CI ran every *step* and none of the
+*bookkeeping*. This act automates the bookkeeping — honestly, with each
+automation named after the real-world tool category it stands in for:
+
+| automation | file | real-world category | Act-1 human step it eats |
+|---|---|---|---|
+| auto-bump | `publish.yaml` (job 1) | semantic-release / release-please | "remember to bump the version" |
+| repin bot | `repin.yaml` | Renovate / Dependabot | "remember to re-pin *every* consumer" (1.1 PRs 2–3) |
+| drift alarm | `drift-alarm.yaml` | dependency dashboards / skew monitors | "notice the drift nobody flagged" |
+| provenance manifest | `publish.yaml` (manifest step) | build provenance (SLSA-ish) | "which commit does production run?" archaeology |
+| scripted hotfix | `hotfix-pinned.yaml` | release-branch / hotfix pipelines | the whole six-step per-env dance |
+
+Starting state (the setup's own shakedown already ran the chain once —
+its runs, merged bot PRs, closed drift issue, and the `release/qb-1.3.0`
+branch are in the history if you want spoilers): `dev` pins `qb==1.6.1`
+(both consumers) and `solver==2.0.0`; `uat` pins `qb==1.6.0`; `production`
+pins `qb==1.3.1` (a hotfix line!). The registry branch holds qb 1.3.0,
+1.3.1, 1.4.0, 1.5.0, 1.6.0, 1.6.1, solver 2.0.0 — and `manifest.json`.
+No PRs are open; the drift issue is closed.
+
+One repo setting worth knowing about: *Settings → Actions → General →
+"Allow GitHub Actions to create and approve pull requests"* is enabled
+here. Without it, `gh pr create` under any workflow token fails outright —
+a different (coarser) gate than the per-event teachable you'll meet in 2.1.
+
+---
+
+## Exercise 2.0 — Read the machines before you feed them
+
+**Goal:** know what's watching dev before you touch it.
+
+**Commands:**
+
+```sh
+git switch dev && git pull
+less .github/workflows/publish.yaml       # auto-bump job + manifest step
+less .github/workflows/repin.yaml         # read the header block twice
+less .github/workflows/drift-alarm.yaml
+less .github/workflows/hotfix-pinned.yaml
+git fetch origin registry
+git show origin/registry:manifest.json | jq .
+git log --oneline origin/registry | head
+```
+
+**What you should observe:** each workflow header names its real-world
+category and the exact human failure it exists to erase. `manifest.json`
+maps every wheel to a `source_commit_sha` and the run that built it —
+including backfilled seed wheels (their `dev_run_url` is `"unknown"`:
+provenance recorded after the fact is best-effort; provenance recorded at
+publish time is exact. That difference is exercise 2.3's foundation.)
+
+**What just happened:** nothing — that's the point. Every remaining
+exercise pokes one of these five with a real change; you now know where
+each reaction will come from.
+
+---
+
+## Exercise 2.1 — The chain, and the bot with no voice
+
+**Goal:** ship a qb change with zero version bookkeeping, then meet the
+one thing the bot can't do: trigger checks.
+
+**Commands:**
+
+```sh
+git switch dev && git pull
+# edit common/qb/src/qb/__init__.py:
+#   ROUNDING -> "rounds HALF-EVEN (banker's rounding) + audit log + query cache"
+# do NOT touch the version. do NOT touch any pins. that's the whole exercise.
+git commit -am "qb: query cache"
+git push
+gh run watch                  # publish: auto-bump job mints, publish builds
+git pull                      # <- a bot(bump) commit landed on dev. read it.
+gh pr list                    # repin fired after publish; ONE batched PR
+gh pr view --json body -q .body <N>
+gh pr checks <N>              # <- zero checks. sit with that.
+```
+
+**What you should observe:** the publish run's summary shows auto-bump
+minting the next patch (`bot(bump): qb 1.6.2`) and publish shipping the
+wheel plus a manifest entry. Then a `bot(repin)` PR appears moving **both**
+consumers in one PR — the Act-1 "forgot the worker" mistake is structurally
+gone. But `gh pr checks` comes back empty: **pr-resolve-check never ran.**
+
+**What just happened:** actions performed with the default `GITHUB_TOKEN`
+do not trigger other workflows — GitHub suppresses those events to prevent
+runaway loops. A PR the bot opens therefore gets no `pull_request` checks.
+This is the exact reason real-world bots (Renovate, Dependabot) run under
+their own identity instead of the workflow token. Now perform the
+real-world fix:
+
+1. GitHub → Settings → Developer settings → Personal access tokens →
+   **Fine-grained tokens** → generate one scoped to *only this repo*, with
+   repository permissions **Contents: Read and write** and **Pull requests:
+   Read and write**.
+2. `gh secret set LAB_BOT_PAT` (paste the token).
+3. Re-arm: `gh pr close <N> --delete-branch`, then
+   `gh workflow run repin.yaml && gh run watch`.
+4. `gh pr checks <new-N>` — **pr-resolve-check is running.** No workflow
+   file changed: every credential in `repin.yaml` already read
+   `secrets.LAB_BOT_PAT || github.token`.
+5. `gh pr merge <new-N> --squash --delete-branch`, then `gh run watch` —
+   the dev deploy shows both consumers **deployed** at the new version.
+
+Count your actions: one push, one secret (once, ever), one merge. Act 1's
+version of this was three PRs and two separate feats of memory.
+
+---
+
+## Exercise 2.2 — Drift becomes a signal
+
+**Goal:** reproduce Act 1's silent-drift state — and this time, get paged.
+
+**Commands:**
+
+```sh
+# make fresh drift: another unbumped qb tweak
+git switch dev && git pull
+# edit qb's ROUNDING string again (any visible tweak)
+git commit -am "qb: tune cache TTL" && git push && gh run watch
+# the bot opens its repin PR. pretend the whole team is at lunch:
+gh pr list
+gh pr close <N> --delete-branch
+
+gh workflow run drift-alarm.yaml && gh run watch
+gh issue list                    # <- the alarm
+gh issue view <issue-N>
+```
+
+**What you should observe:** the run summary is a full status table —
+dev rows scream `DRIFT`, while uat/production rows behind the newest wheel
+say `behind (expected promotion lag)`. The issue lists **only the dev
+rows**: uat and production being behind is the promotion model working,
+not a failure, and an alarm that cries about normal states trains you to
+ignore it. Note the issue title is fixed — re-running the alarm *updates*
+the one issue rather than opening a second.
+
+Now clear it:
+
+```sh
+gh workflow run repin.yaml && gh run watch     # PR re-opens
+gh pr merge <N> --squash --delete-branch && gh run watch
+gh workflow run drift-alarm.yaml && gh run watch
+gh issue list --state closed                   # auto-closed, with a comment
+```
+
+**What just happened:** Act 1's sharpest lesson was that stale pins are a
+*green* state. They still are — deploy and publish are as cheerfully green
+as ever. What changed is that a cron now owns the noticing (every 6 h,
+plus your manual pokes), and its output is a state-managed issue: opened
+when dev drifts, updated in place, closed by the machine the moment the
+drift clears. One honest caveat to file away for 2.4: this alarm compares
+*pins* against *published wheels*. Source that never became a wheel is
+invisible to it.
+
+---
+
+## Exercise 2.3 — The hotfix button
+
+**Goal:** production runs the `qb==1.3.1` hotfix line and still has the
+empty-cart bug. Fix it there without shipping three versions of unrelated
+dev behavior — and watch six manual steps collapse into one dispatch.
+
+**Commands:**
+
+```sh
+# 1. what does production actually run, and where did it come from?
+git fetch origin
+git show origin/production:consumers/worker/pyproject.toml | grep qb==
+git show origin/registry:manifest.json | jq '."qb-1.3.1-py3-none-any.whl"'
+#    note: its source_commit_sha lives on release/qb-1.3.0, not on dev.
+
+# 2. land the fix on dev first (fix-forward, then backport):
+git switch dev && git pull
+# edit common/qb/src/qb/__init__.py:
+#   CART_NOTE -> "empty carts handled correctly"
+git commit -am "fix(qb): empty-cart off-by-one"
+FIX=$(git rev-parse HEAD)        # capture BEFORE the bot's bump commit lands
+git push && gh run watch         # auto-bump + publish: dev line gets the fix
+# merge the repin PR the bot opens (keep dev coherent):
+gh pr list && gh pr merge <N> --squash --delete-branch
+
+# 3. the button:
+gh workflow run hotfix-pinned.yaml \
+  -f package=qb -f fixed_version=1.3.1 -f fix_commit_sha=$FIX
+gh run watch
+gh pr list --base production     # "hotfix: pin qb==1.3.2 on production"
+gh pr merge <N> --merge
+gh run watch                     # the production deploy
+```
+
+**What you should observe:** the hotfix run's summary narrates all six
+steps: manifest lookup (no `git log` spelunking), `release/qb-1.3.1`
+branch cut from the manifest's commit, `cherry-pick -x` of your fix,
+bump to 1.3.2, immutable publish *from that branch*, re-pin PR against
+production. The production deploy then prints the tell:
+`qb 1.3.2: rounds DOWN (empty carts handled correctly)` — the **old**
+rounding behavior with the **new** fix. Surgical. (If you set
+`LAB_BOT_PAT` in 2.1, the production PR even has checks — the upgrade
+applied to every bot in this repo.)
+
+**What just happened:** the per-env-versioning dance — archaeology,
+branch cut, cherry-pick, bump, publish, re-pin — used to be the scariest
+manual ritual in the pinned world, performed under incident pressure.
+It's now an idempotent script with refusal guards (try dispatching it
+again with the same inputs: it refuses — the branch exists and 1.3.2 is
+burned). The load-bearing part is `manifest.json`: provenance written at
+publish time, when it was cheap, is what made step 1 a `jq` one-liner.
+Also notice what you now maintain forever: a growing family of
+`release/*` branches, and a manifest whose correctness nobody checks but
+everybody trusts.
+
+---
+
+## Exercise 2.4 — EDGE: the same number, twice
+
+**Goal:** make two branches mint the same version and watch what an
+immutable registry — and the bot — actually do. Neither does what Act 1
+taught you to expect.
+
+**Part A — the collision that refuses to happen:**
+
+```sh
+git switch dev && git pull
+git switch -c solver-jitter
+# edit common/solver/src/solver/__init__.py: STRATEGY -> "greedy + jitter"
+# edit common/solver/pyproject.toml:          version -> "2.0.1"
+git commit -am "solver 2.0.1: jitter" && git push -u origin solver-jitter
+gh pr create --base dev --fill
+
+git switch dev && git switch -c solver-tiebreak      # same parent commit!
+# ADD a line to solver's __init__.py:  TIEBREAK = "lowest index wins"
+# edit pyproject:                      version -> "2.0.1"   <- SAME number
+git commit -am "solver 2.0.1: tiebreak" && git push -u origin solver-tiebreak
+gh pr create --base dev --fill
+
+gh pr merge solver-jitter --squash --delete-branch && gh run watch
+gh pr merge solver-tiebreak --squash --delete-branch && gh run watch  # <- watch closely
+```
+
+**What you should observe (A):** the first merge publishes solver 2.0.1.
+The second merge — which minted the *same* 2.0.1 on its branch — does
+**not** produce the Act-1 refusal. Read its auto-bump summary: the bot
+minted **2.0.2**. Why: by the time branch two landed, dev already said
+2.0.1, so the squash diff contained *no version change* — to the bot this
+was "source landed unbumped", and it issued a fresh number. This is
+semantic-release's core trick: **version numbers assigned at land time on
+the integration branch cannot collide**, because landing is serial.
+Numbers chosen on feature branches (Act 1's way) collide whenever two
+humans pick the same "next".
+
+**Part B — force the refusal anyway:**
+
+The bot trusts any push that touches the version line ("a human minted
+this deliberately"). Humans mint taken numbers all the time — the classic
+is a botched merge-conflict resolution that resurrects an old version:
+
+```sh
+git switch dev && git pull
+# edit solver source (any small tweak) AND hand-set version DOWN to "2.0.1"
+git commit -am "solver: tweak (botched conflict resolution)" && git push
+gh run watch
+```
+
+**What you should observe (B):** auto-bump defers (version line touched);
+publish hits the immutability gate: `REFUSED: solver 2.0.1 is already in
+the registry`. Green run, no-op publish. Dev now carries source that **no
+wheel contains**, under a number that is burned forever. Now dispatch
+`drift-alarm.yaml`: it stays silent — it compares *pins* to *wheels*, and
+the pins are fine. Two automations just watched a stale state sail past.
+This is why immutable registries force fresh numbers: republishing under
+a taken number would silently change what every existing pin means.
+
+**Recovery** — let the land-time minter do its job:
+
+```sh
+git switch dev
+# any solver source tweak; do NOT touch the version line
+git commit -am "solver: recover the burned number" && git push && gh run watch
+```
+
+Auto-bump walks from 2.0.1 to the next **free** patch — skipping the
+already-published 2.0.2 — mints 2.0.3, publishes, and the repin PR
+follows (notice it's been *updating one PR in place* throughout this
+exercise — that's the batching working). Merge it.
+
+**What just happened:** every automation has edges. The minting bot's
+edge is deference to humans; the alarm's edge is that it measures pins,
+not source. Knowing an automation's blind spots is part of owning it —
+which is the subject of the tally.
+
+---
+
+## Exercise 2.5 — THE TALLY
+
+**Goal:** none. Read, and hold a question open.
+
+One behavior change in Act 1 cost 3 PRs, ~7 runs, and three feats of
+human memory. The same change now costs one push and one bot-PR merge.
+Here is where each human step went — and what stayed:
+
+| human step in Act 1 | automated by | what a human still owns |
+|---|---|---|
+| remember to bump the version | auto-bump (semantic-release category) | choosing MINOR/MAJOR when it matters — the bot only mints patches; reviewing `bot(bump)` commits after the fact |
+| open a re-pin PR per consumer, forget none | repin bot (Renovate category) | **reviewing and merging** the bot PR; deciding when *not* to take an upgrade |
+| notice drift, eventually, by accident | drift alarm (dashboard category) | answering the page; deciding that uat/prod lag stays un-alarmed (someone chose that; someone can choose wrong) |
+| "which commit does production run?" archaeology | provenance manifest | manifest correctness — backfilled entries were best-effort; a wrong SHA here cuts a hotfix branch from the wrong commit, during an incident |
+| the six-step hotfix ritual | hotfix-pinned | picking the fix commit; approving the production PR; the ever-growing `release/*` shelf |
+| — (new work, created by this act) | — | the automations themselves: four workflows of code with known edges (2.4); `LAB_BOT_PAT` rotation when it expires; the actions-create-PRs repo setting; every summary that now goes unread because it's "handled" |
+
+Notice the pattern in column three: nothing that remained is *labor*.
+It's judgment (merge or don't), trust maintenance (the PAT, the manifest),
+and edge-knowledge (2.4). The machine took the remembering and left the
+owning — and added itself to the list of things owned.
+
+Is that operational surface an acceptable price for what versioned wheels
+buy — per-env pins, surgical hotfixes, immutable history? Don't answer
+yet. Run Act 2 in the source world, where none of this machinery exists
+because none of it is needed — and none of its powers are available.
+Then compare.
