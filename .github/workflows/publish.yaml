@@ -93,8 +93,15 @@ jobs:
             fi
 
             # Source changed + version untouched + version already published
-            # = the exact human mistake this job exists to erase. Mint patch+1.
+            # = the exact human mistake this job exists to erase. Mint the
+            # next FREE patch number — not blindly +1: the registry is
+            # immutable, so any number ever published (including one a human
+            # minted by mistake, or a hotfix landed out of band) is burned
+            # forever and must be skipped over.
             NEW="${VERSION%.*}.$(( ${VERSION##*.} + 1 ))"
+            while [ -e ".registry-branch/$PKG-$NEW-py3-none-any.whl" ]; do
+              NEW="${NEW%.*}.$(( ${NEW##*.} + 1 ))"
+            done
             sed -i "s/^version = \"$VERSION\"/version = \"$NEW\"/" "common/$PKG/pyproject.toml"
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
