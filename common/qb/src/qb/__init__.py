@@ -2,9 +2,9 @@
 
 from importlib.metadata import version
 
-ROUNDING = "rounds HALF-UP (perf rewrite) + audit log"
+ROUNDING = "rounds HALF-EVEN (banker's rounding)"
 
-CART_NOTE = "fixed empty carts"
+CART_NOTE = "BUG: off-by-one on empty carts"
 
 
 def describe() -> str:
