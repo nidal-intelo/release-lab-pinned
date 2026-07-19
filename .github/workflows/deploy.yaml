@@ -1,0 +1,118 @@
+# deploy — per-environment deploy on branch push, with tag-based change
+# detection.
+#
+# Mirrors the real setup: each env branch (dev / uat / production) carries a
+# floating tag `lab-<branch>-latest` marking the last deployed commit. On
+# push, a consumer is redeployed ONLY if its own directory changed since that
+# tag:
+#
+#     changed()  =  git diff <tag>..HEAD -- consumers/<name>
+#
+# DELIBERATE BLIND SPOT (this is the lesson, not a bug): the paths watched
+# are consumers/report and consumers/worker — NOT common/**. Publishing a new
+# qb wheel, or even merging new common/ source, does not redeploy anything.
+# Only a change to a consumer's own files (in practice: its pins) does.
+# "Deploy" = install the consumer from the wheel registry per its pins and
+# run it — exactly what deploy.sh does locally.
+name: deploy
+
+on:
+  push:
+    branches: [dev, uat, production]
+
+permissions:
+  contents: write            # to move the lab-<branch>-latest tag
+
+# One deploy per environment at a time (parallel runs would race the tag).
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: change detection needs history and the floating tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The wheel registry (the `registry` branch) as a plain directory.
+      - uses: actions/checkout@v4
+        with:
+          ref: registry
+          path: .registry-branch
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: detect changes + deploy
+        run: |
+          ENV="$GITHUB_REF_NAME"
+          TAG="lab-$ENV-latest"
+          REG="$GITHUB_WORKSPACE/.registry-branch"
+          FAIL=0
+
+          # First run (tag absent): treat every consumer as changed.
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            FIRST_RUN=false
+            echo "last deploy of '$ENV' was $(git rev-parse --short "$TAG")"
+          else
+            FIRST_RUN=true
+            echo "no $TAG tag yet — first deploy, all consumers considered changed"
+          fi
+
+          changed() {   # true if the given path changed since the last deploy
+            $FIRST_RUN && { echo true; return; }
+            git diff --quiet "$TAG" HEAD -- "$@" && echo false || echo true
+          }
+
+          {
+            echo "## deploy: $ENV @ ${GITHUB_SHA::7}"
+            echo ""
+            echo "| consumer | changed since last deploy? | result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for CONSUMER in report worker; do
+            CH="$(changed "consumers/$CONSUMER")"
+            PIN="$(grep -o 'qb==[0-9][^"]*' "consumers/$CONSUMER/pyproject.toml")"
+
+            # Resolve + run the consumer against the registry. For a changed
+            # consumer this IS the deploy; for an unchanged one it only
+            # *inspects* what is currently pinned (so stale pins are visible
+            # in the summary instead of hiding behind "skipped").
+            VENV="$(mktemp -d)/venv"
+            uv venv -q "$VENV"
+            if uv pip install -q --python "$VENV/bin/python" \
+                 --no-index --find-links "$REG" "consumers/$CONSUMER"; then
+              OUT="$("$VENV/bin/python" -c "import $CONSUMER; print($CONSUMER.main())")"
+            else
+              OUT="RESOLUTION FAILED — pin \`$PIN\` has no wheel in the registry"
+              [ "$CH" = true ] && FAIL=1   # a failed *deploy* fails the run
+            fi
+
+            if [ "$CH" = true ]; then
+              echo "[$CONSUMER on $ENV] DEPLOYED: $OUT"
+              echo "| $CONSUMER | yes | **deployed** → $OUT |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "[$CONSUMER on $ENV] skipped (no changes under consumers/$CONSUMER); still pinned $PIN"
+              echo "| $CONSUMER | no | skipped (no changes detected) — still pinned \`$PIN\`, currently resolves to: $OUT |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          {
+            echo ""
+            echo "_A consumer redeploys only when files under its own \`consumers/<name>/\` directory changed. Changes under \`common/\` (or new wheels in the registry) do **not** trigger a redeploy — re-pinning the consumer does._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$FAIL"
+
+      # Only after a successful deploy does the floating tag advance —
+      # exactly like marking "this commit is what's live on <env> now".
+      - name: move lab-<branch>-latest to HEAD
+        run: |
+          TAG="lab-$GITHUB_REF_NAME-latest"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$TAG"
+          git push -f origin "refs/tags/$TAG"
