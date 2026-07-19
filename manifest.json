@@ -1,0 +1,32 @@
+{
+  "qb-1.3.0-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.3.0",
+    "source_commit_sha": "c57eee94e20f689892f5360d99daa277790f6b46",
+    "dev_run_url": "unknown"
+  },
+  "qb-1.4.0-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.4.0",
+    "source_commit_sha": "ddd87e1b2074ab9da575d56673fe7e60189b46c6",
+    "dev_run_url": "unknown"
+  },
+  "qb-1.5.0-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.5.0",
+    "source_commit_sha": "d56f2dd2301e3dd7ed02adbd2d644a093cc38480",
+    "dev_run_url": "unknown"
+  },
+  "qb-1.6.0-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.6.0",
+    "source_commit_sha": "d834bf652939d4e50339fa453d074b673b9be7f6",
+    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29688866047"
+  },
+  "solver-2.0.0-py3-none-any.whl": {
+    "package": "solver",
+    "version": "2.0.0",
+    "source_commit_sha": "c57eee94e20f689892f5360d99daa277790f6b46",
+    "dev_run_url": "unknown"
+  }
+}
