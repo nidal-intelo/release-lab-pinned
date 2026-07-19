@@ -1,0 +1,128 @@
+# drift-alarm — notice, on a clock, when consumer pins fall behind.
+#
+# Act 1's sharpest lesson (exercise 1.1, PR 2): a consumer left on a stale
+# pin is a GREEN state. Every run passes; the drift is visible only if a
+# human happens to read a step summary. This workflow turns drift into a
+# signal that arrives on its own. Real-world category: dependency dashboards
+# / freshness monitors (Renovate's dependency dashboard issue, in-house
+# "version skew" pages, artifact-age alerts).
+#
+# Every 6 hours (and on demand), compare every consumer pin on dev / uat /
+# production against the newest published version of each package, then:
+#
+#   - write the full status table to the step summary, ALWAYS;
+#   - distinguish two very different kinds of "behind":
+#       * dev behind newest        -> DRIFT. Nothing is coming to fix this;
+#         a re-pin has to land on dev. Alarm.
+#       * uat/production behind    -> expected promotion lag. Those branches
+#         receive pins by merge from dev; being behind is their normal state
+#         between promotions. Report, don't alarm.
+#   - when (and only when) dev drifts: open — or update, never duplicate —
+#     ONE tracking issue; close it automatically once dev is clean again.
+#
+# The issue is the alarm. The cron is what makes it an alarm rather than a
+# report a human must remember to ask for.
+
+name: drift-alarm
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # every 6h (odd minute: kinder to the cron herd)
+  workflow_dispatch: {}       # exercises poke it on demand
+
+permissions:
+  contents: read
+  issues: write               # the tracking issue is our alarm channel
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "Drift: consumers behind newest published wheels"
+    steps:
+      - uses: actions/checkout@v4     # dev (default branch)
+
+      # Newest published versions live here, as wheel filenames.
+      - uses: actions/checkout@v4
+        with:
+          ref: registry
+          path: .registry-branch
+
+      - name: compare every env's pins against the registry
+        run: |
+          REG="$GITHUB_WORKSPACE/.registry-branch"
+          # The other environments' trees, without switching branches.
+          git fetch -q origin uat production
+
+          newest() {
+            ls "$REG/$1"-*.whl 2>/dev/null | xargs -rn1 basename \
+              | sed -E "s/^$1-(.+)-py3-none-any\.whl$/\1/" | sort -V | tail -1
+          }
+
+          TABLE="| branch | consumer | package | pinned | newest | status |
+          |---|---|---|---|---|---|"
+          DRIFT_ROWS=""            # dev-only rows that justify the alarm
+
+          for BR in dev uat production; do
+            # dev = our checkout; others read from the fetched refs.
+            [ "$BR" = dev ] && REF="HEAD" || REF="origin/$BR"
+            for CONSUMER in report worker; do
+              TOML="$(git show "$REF:consumers/$CONSUMER/pyproject.toml")"
+              for PKG in qb solver; do
+                PIN="$(printf '%s' "$TOML" | grep -oE "$PKG==[0-9.]+" | head -1 | cut -d= -f3)"
+                [ -n "$PIN" ] || continue          # consumer doesn't use PKG
+                NEW="$(newest "$PKG")"
+                if [ "$PIN" = "$NEW" ]; then
+                  STATUS=":white_check_mark: current"
+                elif [ "$BR" = dev ]; then
+                  # Behind on dev: no promotion will ever fix this. DRIFT.
+                  STATUS=":rotating_light: **DRIFT** — dev is where re-pins land; nothing upstream will fix this"
+                  DRIFT_ROWS="$DRIFT_ROWS
+          | $CONSUMER | $PKG | \`$PKG==$PIN\` | \`$NEW\` |"
+                else
+                  # Behind on uat/production: normal life between promotions.
+                  STATUS=":hourglass_flowing_sand: behind (expected promotion lag)"
+                fi
+                TABLE="$TABLE
+          | $BR | $CONSUMER | $PKG | \`$PKG==$PIN\` | \`$NEW\` | $STATUS |"
+              done
+            done
+          done
+
+          {
+            echo "## drift-alarm"
+            echo ""
+            echo "$TABLE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ---- the alarm: one tracking issue, opened/updated/closed -------
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          OPEN_ISSUE="$(gh issue list --state open --json number,title \
+            --jq ".[] | select(.title == \"$ISSUE_TITLE\") | .number" | head -1)"
+
+          if [ -n "$DRIFT_ROWS" ]; then
+            BODY="Consumers on **dev** are pinned behind the newest published wheels:
+
+          | consumer | package | pinned | newest |
+          |---|---|---|---|$DRIFT_ROWS
+
+          uat/production lag is expected promotion lag and is deliberately NOT alarmed — this issue is only about dev.
+
+          _Maintained by drift-alarm.yaml; it will close this issue automatically when dev pins catch up. Last checked: $(date -u +%FT%TZ) ([run]($RUN_URL))._"
+            if [ -n "$OPEN_ISSUE" ]; then
+              gh issue edit "$OPEN_ISSUE" --body "$BODY"
+              echo "- updated tracking issue #$OPEN_ISSUE" >> "$GITHUB_STEP_SUMMARY"
+            else
+              gh issue create --title "$ISSUE_TITLE" --body "$BODY"
+              echo "- opened the tracking issue" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            if [ -n "$OPEN_ISSUE" ]; then
+              gh issue close "$OPEN_ISSUE" \
+                --comment "Drift cleared: every dev pin matches the newest published wheel as of $(date -u +%FT%TZ) ([run]($RUN_URL))."
+              echo "- dev is clean — closed tracking issue #$OPEN_ISSUE" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- dev is clean — no tracking issue open, nothing to do" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
