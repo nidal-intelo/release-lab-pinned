@@ -1,0 +1,63 @@
+# pr-resolve-check — "would this PR actually deploy?"
+#
+# On every PR, take the PR's MERGE PREVIEW (what the base branch would look
+# like after merging) and run the same resolution a deploy would: install both
+# consumers from the wheel registry per their pins, --no-index.
+#
+# This is the check that SERIALIZES the two-PR dance (exercise 1.2): a PR that
+# bumps qb to X.Y.Z *and* re-pins a consumer to qb==X.Y.Z in the same PR fails
+# here — the X.Y.Z wheel doesn't exist yet, because publish only runs when the
+# bump lands on dev. Pins may only ever reference wheels that are ALREADY in
+# the registry, so bump-and-publish must fully land before any re-pin PR can
+# go green.
+name: pr-resolve-check
+
+on:
+  pull_request:
+    branches: [dev, uat, production]
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      # Default pull_request checkout = the merge preview commit.
+      - uses: actions/checkout@v4
+
+      # The wheel registry as it exists RIGHT NOW (not as it would be after
+      # this PR merges — that's the whole point).
+      - uses: actions/checkout@v4
+        with:
+          ref: registry
+          path: .registry-branch
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: resolve consumer pins against the current registry
+        run: |
+          REGISTRY_DIR="$GITHUB_WORKSPACE/.registry-branch" ./deploy.sh pr-check
+          {
+            echo "## pr-resolve-check: OK"
+            echo "Every consumer pin resolves against the current registry."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: explain the failure
+        if: failure()
+        run: |
+          {
+            echo "## pr-resolve-check: FAILED"
+            echo ""
+            echo "A consumer pin references a wheel that is **not in the registry yet**."
+            echo ""
+            echo "Registry currently contains:"
+            echo '```'
+            ls .registry-branch/*.whl | xargs -n1 basename
+            echo '```'
+            echo ""
+            echo "If this PR bumps a package version *and* re-pins a consumer to it:"
+            echo "that cannot work in one PR — the wheel is only published when the"
+            echo "bump lands on dev. Split it: **PR1** bump (publish fires on merge),"
+            echo "**PR2** re-pin. This is why the dance is two PRs."
+          } >> "$GITHUB_STEP_SUMMARY"
