@@ -1,0 +1,95 @@
+# publish — build common packages into the wheel registry (the `registry` branch).
+#
+# Mirrors the real setup: a push to dev that touches common/** triggers a
+# publish. For each package we read `version` from its pyproject and check the
+# registry. The registry is IMMUTABLE:
+#
+#     same version = no republish.
+#
+# Only a version BUMP produces a new wheel. Note what this workflow does NOT
+# do: it never touches consumer pins. Publishing a wheel changes nothing about
+# what any environment runs — that requires a second, human-made change (the
+# re-pin). This is the "two-PR dance" of exercise 1.1.
+name: publish
+
+on:
+  push:
+    branches: [dev]          # publishing happens from dev only
+    paths: ["common/**"]     # ...and only when shared-package source changed
+
+permissions:
+  contents: write            # we commit wheels to the `registry` branch
+
+# The registry branch is a single shared resource: if two publishes ran at
+# once, the second push would be rejected (non-fast-forward). Serialize them.
+concurrency:
+  group: registry-branch
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # The pushed dev tree — source of truth for package versions + code.
+      - uses: actions/checkout@v4
+
+      # The registry, checked out as a plain subdirectory. This is the CI
+      # equivalent of publish.sh's ../registry.
+      - uses: actions/checkout@v4
+        with:
+          ref: registry
+          path: .registry-branch
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: build any wheel whose version is not yet published
+        run: |
+          # Absolute path: uv resolves a relative --out-dir against the
+          # package being built, not the workflow's working directory.
+          REG="$GITHUB_WORKSPACE/.registry-branch"
+          echo "## publish (dev @ ${GITHUB_SHA::7})" >> "$GITHUB_STEP_SUMMARY"
+
+          for PKG in qb solver; do
+            VERSION="$(grep -m1 '^version' "common/$PKG/pyproject.toml" | cut -d'"' -f2)"
+            WHEEL="$PKG-$VERSION-py3-none-any.whl"
+
+            # --- the immutability gate ------------------------------------
+            if [ -e "$REG/$WHEEL" ]; then
+              echo "REFUSED: $PKG $VERSION is already in the registry (immutable)."
+              echo "- :no_entry: **$PKG $VERSION already published — no-op. Same version = no republish.** (bump the version in common/$PKG/pyproject.toml to ship new code)" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            # Build into a temp dir and copy the wheel over. (Not straight
+            # into the checkout: uv drops a ".gitignore" containing "*" into
+            # its out-dir, which would hide the new wheel from git entirely.)
+            uv build -q --wheel "common/$PKG" -o "$RUNNER_TEMP/dist-$PKG"
+            cp "$RUNNER_TEMP/dist-$PKG/$WHEEL" "$REG/"
+            # Trust nothing: the wheel must exist where the commit step looks.
+            [ -e "$REG/$WHEEL" ] || { echo "BUILD FAILED: $WHEEL not in registry checkout" >&2; exit 1; }
+            echo "published: $WHEEL"
+            echo "- :package: **published \`$WHEEL\`** to the registry branch" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: commit new wheels to the registry branch (if any)
+        run: |
+          cd .registry-branch
+          git add -A
+          if git diff --cached --quiet; then
+            echo "registry unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "publish: $(git diff --cached --name-only | tr '\n' ' ')"
+          git push origin HEAD:registry
+
+      - name: registry contents (after)
+        run: |
+          {
+            echo ""
+            echo "### registry now contains"
+            echo '```'
+            ls .registry-branch/*.whl | xargs -n1 basename
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -8,7 +8,9 @@ set -euo pipefail
 command -v uv >/dev/null 2>&1 || export PATH="/opt/homebrew/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-REGISTRY="$ROOT/../registry"
+# Registry location: ../registry for local use; CI points REGISTRY_DIR at a
+# checkout of the `registry` branch instead.
+REGISTRY="${REGISTRY_DIR:-$ROOT/../registry}"
 BRANCH="$(git -C "$ROOT" branch --show-current 2>/dev/null || true)"
 ENV="${1:-${BRANCH:-detached}}"
 
