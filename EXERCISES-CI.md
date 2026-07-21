@@ -266,13 +266,15 @@ automation named after the real-world tool category it stands in for:
 | provenance manifest | `publish.yaml` (manifest step) | build provenance (SLSA-ish) | "which commit does production run?" archaeology |
 | scripted hotfix | `hotfix-pinned.yaml` | release-branch / hotfix pipelines | the whole six-step per-env dance |
 
-Starting state (the setup's own shakedown already ran the chain once —
-its runs, merged bot PRs, closed drift issue, and the `release/qb-1.3.0`
-branch are in the history if you want spoilers): `dev` pins `qb==1.6.1`
-(both consumers) and `solver==2.0.0`; `uat` pins `qb==1.6.0`; `production`
-pins `qb==1.3.1` (a hotfix line!). The registry branch holds qb 1.3.0,
-1.3.1, 1.4.0, 1.5.0, 1.6.0, 1.6.1, solver 2.0.0 — and `manifest.json`.
-No PRs are open; the drift issue is closed.
+Starting state (the setup's own shakedown already ran the chain several
+times — its runs, merged bot PRs, closed drift issue, and the
+`release/qb-1.3.0`/`release/qb-1.3.1` branches are in the history if you want
+spoilers): `dev` pins `qb==1.6.5` (both consumers) and `solver==2.0.0`;
+`uat` pins `qb==1.6.0`; `production` pins `qb==1.3.2` (a hotfix line!). The
+registry branch holds qb 1.3.0, 1.3.1, 1.3.2, 1.4.0, 1.5.0, 1.6.0–1.6.5,
+solver 2.0.0 — and `manifest.json`. No PRs are open; the drift issue is
+closed. Note uat and production are now on **two different version lines**
+(1.6.x vs 1.3.x) — that gap is the whole subject of exercise 2.3.
 
 One repo setting worth knowing about: *Settings → Actions → General →
 "Allow GitHub Actions to create and approve pull requests"* is enabled
@@ -411,60 +413,78 @@ invisible to it.
 
 ---
 
-## Exercise 2.3 — The hotfix button
+## Exercise 2.3 — The hotfix button (one fix, TWO version lines)
 
-**Goal:** production runs the `qb==1.3.1` hotfix line and still has the
-empty-cart bug. Fix it there without shipping three versions of unrelated
-dev behavior — and watch six manual steps collapse into one dispatch.
+**Goal:** ship one fix to both deployed environments — and feel the cost
+that per-env versioning hides. uat pins `qb==1.6.0`; production pins
+`qb==1.3.2`. They are on **different version lines**. There is no single
+"1.6.0-and-1.3.2" artifact to patch: the fix must be minted **twice**, once
+per line. Watch one dispatch do both — and count what "both" costs.
 
 **Commands:**
 
 ```sh
-# 1. what does production actually run, and where did it come from?
+# 1. what do the two environments actually run?
 git fetch origin
-git show origin/production:consumers/worker/pyproject.toml | grep qb==
-git show origin/registry:manifest.json | jq '."qb-1.3.1-py3-none-any.whl"'
-#    note: its source_commit_sha lives on release/qb-1.3.0, not on dev.
+git show origin/uat:consumers/worker/pyproject.toml        | grep qb==   # 1.6.0
+git show origin/production:consumers/worker/pyproject.toml  | grep qb==   # 1.3.2
+git show origin/registry:manifest.json | jq '."qb-1.6.0-py3-none-any.whl", ."qb-1.3.2-py3-none-any.whl"'
+#    each line's wheel points at its OWN source commit — two lineages.
 
-# 2. land the fix on dev first (fix-forward, then backport):
+# 2. land the fix on dev first (fix-forward, then backport to both lines):
 git switch dev && git pull
-# edit common/qb/src/qb/__init__.py:
-#   CART_NOTE -> "empty carts handled correctly"
-git commit -am "fix(qb): empty-cart off-by-one"
-FIX=$(git rev-parse HEAD)        # capture BEFORE the bot's bump commit lands
-git push && gh run watch         # auto-bump + publish: dev line gets the fix
-# merge the repin PR the bot opens (keep dev coherent):
-gh pr list && gh pr merge <N> --squash --delete-branch
+# make a small visible change in common/qb/src/qb/__init__.py, then:
+git commit -am "fix(qb): <the fix>"
+FIX=$(git rev-parse HEAD)         # a plain commit works; a PR MERGE commit
+                                  # also works (the button auto-detects and
+                                  # cherry-picks it with -m 1)
+git push && gh run watch          # auto-bump + publish: the DEV line gets it
+gh pr list && gh pr merge <N> --squash --delete-branch   # merge the bot's repin
 
-# 3. the button:
-gh workflow run hotfix-pinned.yaml \
-  -f package=qb -f fixed_version=1.3.1 -f fix_commit_sha=$FIX
-gh run watch
-gh pr list --base production     # "hotfix: pin qb==1.3.2 on production"
-gh pr merge <N> --merge
-gh run watch                     # the production deploy
+# 3. the button — note: NO fixed_version input anymore. It reads both pins.
+gh workflow run hotfix-pinned.yaml -f package=qb -f fix_commit_sha=$FIX
+gh run watch                      # READ THE SUMMARY — the tally is the lesson
+gh pr list                        # TWO PRs: "…pin qb==1.6.6 on uat"
+                                  #      and "[merge after uat] …pin qb==1.3.3 on production"
+
+# 4. uat FIRST (convention — the pinned world has no gate to force it):
+gh pr merge <uat-pr> --merge  && gh run watch   # uat deploys qb 1.6.6
+# validate uat, THEN:
+gh pr merge <prod-pr> --merge && gh run watch   # production deploys qb 1.3.3
 ```
 
-**What you should observe:** the hotfix run's summary narrates all six
-steps: manifest lookup (no `git log` spelunking), `release/qb-1.3.1`
-branch cut from the manifest's commit, `cherry-pick -x` of your fix,
-bump to 1.3.2, immutable publish *from that branch*, re-pin PR against
-production. The production deploy then prints the tell:
-`qb 1.3.2: rounds DOWN (empty carts handled correctly)` — the **old**
-rounding behavior with the **new** fix. Surgical. (If you set
-`LAB_BOT_PAT` in 2.1, the production PR even has checks — the upgrade
-applied to every bot in this repo.)
+**What you should observe:** the run summary narrates the six-step ritual
+**twice** and ends with the tally: *One fix → 2 version lines (qb 1.3.3 for
+prod, qb 1.6.6 for uat) → 2 wheels published → 2 re-pin PRs.* Two
+`release/qb-1.6.0` and `release/qb-1.3.2` branches were cut (each from its
+own line's source per `manifest.json`), the fix cherry-picked onto each, each
+bumped to its line's next free patch, both wheels published in one immutable
+registry commit. The uat deploy prints `qb 1.6.6: rounds HALF-EVEN … + audit
+log (…)`; the production deploy prints `qb 1.3.3: rounds DOWN (…)` — the fix
+on top of each line's *own* old behavior. Surgical, per line, times two.
 
-**What just happened:** the per-env-versioning dance — archaeology,
-branch cut, cherry-pick, bump, publish, re-pin — used to be the scariest
-manual ritual in the pinned world, performed under incident pressure.
-It's now an idempotent script with refusal guards (try dispatching it
-again with the same inputs: it refuses — the branch exists and 1.3.2 is
-burned). The load-bearing part is `manifest.json`: provenance written at
-publish time, when it was cheap, is what made step 1 a `jq` one-liner.
-Also notice what you now maintain forever: a growing family of
-`release/*` branches, and a manifest whose correctness nobody checks but
-everybody trusts.
+**What just happened:** the per-env-versioning dance is now one button — but
+the button did the work of two, because the environments had drifted onto two
+lines. That is the structural cost the source world doesn't pay: there, the
+same fix rode uat→production as a **single cherry-pick** (one commit, one
+review, one artifact — see source-world exercise 3.5). Here: two branches you
+now maintain forever, two wheels burned into an immutable registry, two PRs to
+review under incident pressure. Ordering is uat-first **by convention only**
+(the `[merge after uat]` title prefix and the summary note) — the pinned
+world has no gate; a human keeps the order.
+
+> **Optional deep-dive (skip unless the room asks).** Look hard at the uat
+> patch: **1.6.6 is built from 1.6.0 + the fix** — so it contains *less* than
+> the already-published 1.6.1…1.6.5, which carried later dev features 1.6.0
+> never had. The version number now **lies across lines**: 1.6.6 > 1.6.5
+> numerically, but 1.6.6 is behaviorally a *subset* of 1.6.5. If dev ever
+> "upgraded" to 1.6.6 it would silently **regress** (lose 1.6.1…1.6.5's
+> changes). This incoherence is inherent to per-env versioning on a shared
+> auto-bumping trunk: hotfix patches and trunk patches mint into the *same*
+> numeric space but come from *divergent* commits. The source world sidesteps
+> it entirely — there are no version numbers to lie, only commits that either
+> are or aren't in a branch. (Main narration stays on the doubled ceremony;
+> this is the sharp edge underneath it.)
 
 ---
 
@@ -561,7 +581,7 @@ Here is where each human step went — and what stayed:
 | open a re-pin PR per consumer, forget none | repin bot (Renovate category) | **reviewing and merging** the bot PR; deciding when *not* to take an upgrade |
 | notice drift, eventually, by accident | drift alarm (dashboard category) | answering the page; deciding that uat/prod lag stays un-alarmed (someone chose that; someone can choose wrong) |
 | "which commit does production run?" archaeology | provenance manifest | manifest correctness — backfilled entries were best-effort; a wrong SHA here cuts a hotfix branch from the wrong commit, during an incident |
-| the six-step hotfix ritual | hotfix-pinned | picking the fix commit; approving the production PR; the ever-growing `release/*` shelf |
+| the six-step hotfix ritual | hotfix-pinned | picking the fix commit; approving **two** PRs (uat + prod) in the right order — by convention, no gate; the ever-growing `release/*` shelf, now two branches per fix because the envs are on two lines |
 | — (new work, created by this act) | — | the automations themselves: four workflows of code with known edges (2.4); `LAB_BOT_PAT` rotation when it expires; the actions-create-PRs repo setting; every summary that now goes unread because it's "handled" |
 
 Notice the pattern in column three: nothing that remained is *labor*.
