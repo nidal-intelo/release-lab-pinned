@@ -123,7 +123,16 @@ jobs:
 
           # ---- step 3: cherry-pick the fix (with -x: the commit message
           # records where the fix came from — provenance again) --------------
-          git cherry-pick -x "$FIX"
+          # -m 1: the fix SHA is typically a PR MERGE commit (two parents);
+          # -m 1 replays its changes relative to the base-branch parent. Plain
+          # merge commits (git detects two parents) need it or cherry-pick
+          # aborts with "is a merge but no -m option was given". Harmless for a
+          # non-merge commit? No — git rejects -m on those, so branch on it.
+          if [ "$(git rev-list --parents -n1 "$FIX" | wc -w)" -gt 2 ]; then
+            git cherry-pick -x -m 1 "$FIX"      # merge commit
+          else
+            git cherry-pick -x "$FIX"           # ordinary commit
+          fi
 
           # ---- step 4: bump the patch version on the release branch --------
           sed -i "s/^version = \"$FIXED\"/version = \"$NEW\"/" "common/$PKG/pyproject.toml"
