@@ -58,5 +58,11 @@
     "version": "1.6.4",
     "source_commit_sha": "f70161a0717634b0edd09b4199dbe18d80c20099",
     "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29808861258"
+  },
+  "qb-1.3.2-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.3.2",
+    "source_commit_sha": "c388bd86d763a8151b8e1e54577f50766e701487",
+    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29809075642"
   }
 }
