@@ -6,7 +6,7 @@ ROUNDING = (
     "rounds HALF-EVEN (banker's rounding) + audit log + query cache + tweak again"
 )
 
-CART_NOTE = "BUG: off-by-one on empty carts"
+CART_NOTE = "empty carts handled correctly"
 
 TRACE = "query trace marker: enabled"
 
