@@ -15,3 +15,5 @@ def describe() -> str:
     return f"qb {version('qb')}: {ROUNDING} ({CART_NOTE})"
 
 # demo: tweak qb behavior
+
+# hotfix: correct qb edge case (demo)
