@@ -2,7 +2,7 @@
 
 from importlib.metadata import version
 
-ROUNDING = "rounds HALF-EVEN (banker's rounding) + audit log"
+ROUNDING = "rounds HALF-EVEN (banker's rounding) + audit log + query cache"
 
 CART_NOTE = "BUG: off-by-one on empty carts"
 
