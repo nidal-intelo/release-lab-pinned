@@ -70,5 +70,17 @@
     "version": "1.6.5",
     "source_commit_sha": "405dd9a820e31b36f7bf6aae53dd04ee1c52333f",
     "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29870441707"
+  },
+  "qb-1.6.6-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.6.6",
+    "source_commit_sha": "cf8e8cdcd267cb7583a7e948fc134a3850ba5035",
+    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29873876248"
+  },
+  "qb-1.3.3-py3-none-any.whl": {
+    "package": "qb",
+    "version": "1.3.3",
+    "source_commit_sha": "df59aedfa9b2c05f36832322b38b02ca73e0b403",
+    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29873876248"
   }
 }
