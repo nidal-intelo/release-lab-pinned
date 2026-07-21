@@ -1,6 +1,6 @@
 [project]
 name = "qb"
-version = "1.6.2"
+version = "1.6.3"
 description = "Stand-in for query-builder"
 requires-python = ">=3.9"
 
