@@ -1,34 +1,45 @@
 # hotfix-pinned — the per-env-versioning dance, as one button.
 #
-# THE SCENARIO: production is pinned to qb==1.3.0; dev has long since moved
-# on (1.6.x). A bug in production must be fixed WITHOUT shipping three
-# versions' worth of unrelated change. In a pinned/versioned-artifact world
-# the manual ritual is:
+# THE SCENARIO: a bug lives in what production runs. But uat and production
+# sit on DIFFERENT version lines (uat pins qb==1.6.0, production pins
+# qb==1.3.2). Fix-forward on dev is not enough — dev is on 1.6.x and the fix
+# must reach BOTH deployed lines without dragging along the versions between.
 #
-#   1. archaeology — which commit did the 1.3.0 wheel come from?
-#      (traditionally: git log spelunking through pyproject.toml history)
-#   2. cut a release branch from that commit
-#   3. cherry-pick the fix commit onto it
-#   4. bump the patch version (1.3.0 -> 1.3.1)
-#   5. build + publish the wheel from THAT branch (immutability still applies)
-#   6. open a PR re-pinning production to the patch version
+# THE COST THIS EXPOSES: because the two environments are on two version
+# lines, one fix must be minted TWICE — once per line. Two release branches,
+# two cherry-picks, two patch bumps, two published wheels, two re-pin PRs.
+# That doubling is not an accident of this script; it is the price of
+# per-env pinned versioning. (Contrast the source world, where the same fix
+# is a SINGLE cherry-pick that rides uat->production as one commit.)
 #
-# This workflow is all six steps. Step 1 stops being archaeology because
-# publish.yaml now writes manifest.json (wheel -> source commit) at publish
-# time — provenance recorded when it's cheap, not reconstructed when it's
-# urgent. Real-world category: release-branch automation / hotfix pipelines
-# (release-please's release branches, "cut a patch release" buttons), backed
-# by provenance metadata (build provenance / SLSA-style "which commit built
-# this artifact").
+# For EACH line (uat's, production's) the classic six-step ritual runs:
+#   1. archaeology — which commit did that line's wheel come from?
+#      (now a manifest.json lookup, not git-log spelunking)
+#   2. cut release/<pkg>-<thatversion> from that commit
+#   3. cherry-pick the fix (-x; -m 1 when it's a merge commit)
+#   4. bump to the next FREE patch on that line (registry is immutable, so we
+#      scan upward: 1.3.2 -> 1.3.3; 1.6.0 -> 1.6.6 because 1.6.1..1.6.5 exist)
+#   5. build + publish that wheel to the registry, with a manifest entry
+#   6. open a re-pin PR for that environment
+#
+# ORDERING IS BY CONVENTION, NOT ENFORCEMENT. The pinned world has no gate
+# workflow and no branch protection (that is a source-world feature; adding
+# it here would muddy the comparison). Uat-first is signalled two ways: the
+# production PR's title is prefixed "[merge after uat] ", and the step
+# summary says so out loud. A human keeps the order.
 #
 # Inputs:
-#   package        — qb | solver
-#   fixed_version  — the version production is pinned to (e.g. 1.3.0)
-#   fix_commit_sha — a commit on dev containing the fix to cherry-pick
+#   package         — qb | solver
+#   fix_commit_sha  — a commit on dev (often a PR MERGE commit) carrying the fix
 #
-# Note the PR-creation credential prefers secrets.LAB_BOT_PAT (same
-# teachable as repin.yaml: a GITHUB_TOKEN-created PR triggers no
-# pull_request checks).
+# The versions to patch are AUTO-DETECTED from what uat and production
+# actually pin right now — no need to type them, and no way to fat-finger
+# the wrong line under incident pressure.
+#
+# Real-world category: release-branch automation / hotfix pipelines backed by
+# build provenance (SLSA-style "which commit built this artifact"). PR
+# credential prefers secrets.LAB_BOT_PAT (same teachable as repin.yaml: a
+# GITHUB_TOKEN-created PR triggers no pull_request checks).
 
 name: hotfix-pinned
 
@@ -40,18 +51,14 @@ on:
         type: choice
         options: [qb, solver]
         required: true
-      fixed_version:
-        description: "the published version to patch (what production pins, e.g. 1.3.0)"
-        type: string
-        required: true
       fix_commit_sha:
-        description: "commit on dev containing the fix (cherry-picked onto the release branch)"
+        description: "commit on dev containing the fix (cherry-picked onto BOTH release lines)"
         type: string
         required: true
 
 permissions:
-  contents: write            # release branch + registry commit + repin branch
-  pull-requests: write       # the PR against production
+  contents: write            # release branches + registry commit + repin branches
+  pull-requests: write       # the two re-pin PRs
 
 # Writes the registry branch — share publish.yaml's lock so they never race.
 concurrency:
@@ -64,9 +71,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.LAB_BOT_PAT || github.token }}
     steps:
-      # Full history + every branch: the source commit of an old version may
-      # sit deep in dev history, or on a previous release/* branch (a hotfix
-      # of a hotfix).
+      # Full history + every branch: a line's source commit may sit deep in
+      # dev history or on a previous release/* branch (a hotfix of a hotfix).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -80,10 +86,10 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: cut, cherry-pick, bump, publish, open the re-pin PR
+      - name: hotfix both version lines, open both re-pin PRs
         run: |
+          set -euo pipefail
           PKG="${{ inputs.package }}"
-          FIXED="${{ inputs.fixed_version }}"
           FIX="${{ inputs.fix_commit_sha }}"
           REG="$GITHUB_WORKSPACE/.registry-branch"
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -91,96 +97,149 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # ---- step 1: the archaeology, read from a file -------------------
-          WHEEL="$PKG-$FIXED-py3-none-any.whl"
-          [ -e "$REG/$WHEEL" ] || { echo "::error::$WHEEL is not in the registry — nothing to hotfix"; exit 1; }
-          SRC="$(jq -r --arg w "$WHEEL" '.[$w].source_commit_sha // "missing"' "$REG/manifest.json")"
-          if [ "$SRC" = missing ] || [ "$SRC" = unknown ]; then
-            echo "::error::manifest.json has no usable source commit for $WHEEL (got: $SRC). Without provenance you are back to manual git-log archaeology."
-            exit 1
-          fi
-          git cat-file -e "$SRC" || { echo "::error::manifest points at $SRC but that commit is not in this repo"; exit 1; }
-          git cat-file -e "$FIX" || { echo "::error::fix commit $FIX not found"; exit 1; }
-          echo "## hotfix: $PKG $FIXED (source commit ${SRC:0:7})" >> "$GITHUB_STEP_SUMMARY"
+          git cat-file -e "$FIX" || { echo "::error::fix commit $FIX not found on dev/history"; exit 1; }
 
-          # ---- step 4 (computed early so we can refuse early): the patch ---
-          NEW="${FIXED%.*}.$(( ${FIXED##*.} + 1 ))"
-          # Immutability applies to hotfix wheels like any other: if the next
-          # patch number is taken, this hotfix line already moved — rerun with
-          # fixed_version=$NEW to stack on top of it.
-          if [ -e "$REG/$PKG-$NEW-py3-none-any.whl" ]; then
-            echo "::error::$PKG $NEW already exists in the registry (immutable). The $FIXED line has already been hotfixed — rerun with fixed_version=$NEW to patch on top of it."
-            exit 1
+          # --- AUTO-DETECT the two lines from what each env actually pins ----
+          detect_pin() { # <env-branch>
+            git show "origin/$1:consumers/report/pyproject.toml" \
+              | sed -n "s/.*\"$PKG==\([0-9][0-9.]*\)\".*/\1/p" | head -1
+          }
+          UAT_VER="$(detect_pin uat)"
+          PROD_VER="$(detect_pin production)"
+          [ -n "$UAT_VER" ]  || { echo "::error::uat does not pin $PKG"; exit 1; }
+          [ -n "$PROD_VER" ] || { echo "::error::production does not pin $PKG"; exit 1; }
+          echo "detected lines — uat: $PKG==$UAT_VER, production: $PKG==$PROD_VER"
+
+          if [ "$UAT_VER" = "$PROD_VER" ]; then
+            echo "::warning::uat and production are on the SAME line ($PKG==$UAT_VER) — this fix mints ONE wheel, not two. (The two-line cost only bites when the environments have drifted apart.)"
           fi
 
-          # ---- step 2: cut the release branch from the source commit -------
-          RELBRANCH="release/$PKG-$FIXED"
-          if git ls-remote --exit-code -q origin "refs/heads/$RELBRANCH" >/dev/null; then
-            echo "::error::branch $RELBRANCH already exists on origin — refusing to recut it."
-            exit 1
-          fi
-          git checkout -q -b "$RELBRANCH" "$SRC"
+          # next FREE patch at or above a base version (registry is immutable,
+          # so we cannot reuse a burned number — scan upward past 1.6.1..1.6.5)
+          next_free() { # <base e.g. 1.6.0>  ->  1.6.6
+            local mm="${1%.*}" p="${1##*.}"
+            while [ -e "$REG/$PKG-$mm.$p-py3-none-any.whl" ]; do p=$((p+1)); done
+            echo "$mm.$p"
+          }
 
-          # ---- step 3: cherry-pick the fix (with -x: the commit message
-          # records where the fix came from — provenance again) --------------
-          # -m 1: the fix SHA is typically a PR MERGE commit (two parents);
-          # -m 1 replays its changes relative to the base-branch parent. Plain
-          # merge commits (git detects two parents) need it or cherry-pick
-          # aborts with "is a merge but no -m option was given". Harmless for a
-          # non-merge commit? No — git rejects -m on those, so branch on it.
-          if [ "$(git rev-list --parents -n1 "$FIX" | wc -w)" -gt 2 ]; then
-            git cherry-pick -x -m 1 "$FIX"      # merge commit
-          else
-            git cherry-pick -x "$FIX"           # ordinary commit
-          fi
+          # cherry-pick the fix onto the branch we're standing on. -m 1: the
+          # fix SHA is usually a PR MERGE commit (two parents); -m 1 replays it
+          # relative to the base-branch parent. git rejects -m on ordinary
+          # commits, so branch on parent count.
+          pick_fix() {
+            if [ "$(git rev-list --parents -n1 "$FIX" | wc -w)" -gt 2 ]; then
+              git cherry-pick -x -m 1 "$FIX"
+            else
+              git cherry-pick -x "$FIX"
+            fi
+          }
 
-          # ---- step 4: bump the patch version on the release branch --------
-          sed -i "s/^version = \"$FIXED\"/version = \"$NEW\"/" "common/$PKG/pyproject.toml"
-          grep -q "version = \"$NEW\"" "common/$PKG/pyproject.toml" || { echo "::error::bump failed — is $FIXED really the version at ${SRC:0:7}?"; exit 1; }
-          git commit -am "hotfix: $PKG $NEW (cherry-pick ${FIX:0:7} onto $FIXED)"
-          git push origin "HEAD:$RELBRANCH"
-          echo "- :herb: cut \`$RELBRANCH\` from \`${SRC:0:7}\`, cherry-picked \`${FIX:0:7}\`, bumped $FIXED -> **$NEW**" >> "$GITHUB_STEP_SUMMARY"
+          # ---- process ONE line: steps 1-5. Sets NEW_* / WHEEL_* by name. --
+          # args: <base-version> <out-var-for-new-version> <out-var-for-wheel>
+          process_line() {
+            local BASE="$1" __newvar="$2" __whlvar="$3"
+            local WHEEL="$PKG-$BASE-py3-none-any.whl"
 
-          # ---- step 5: build + publish from THIS branch, manifest included -
-          uv build -q --wheel "common/$PKG" -o "$RUNNER_TEMP/hotfix-dist"
-          NEWWHEEL="$PKG-$NEW-py3-none-any.whl"
-          cp "$RUNNER_TEMP/hotfix-dist/$NEWWHEEL" "$REG/"
-          [ -e "$REG/$NEWWHEEL" ] || { echo "::error::build produced no $NEWWHEEL"; exit 1; }
-          HOTFIX_SHA="$(git rev-parse HEAD)"
-          jq --arg w "$NEWWHEEL" --arg p "$PKG" --arg v "$NEW" \
-             --arg sha "$HOTFIX_SHA" --arg url "$RUN_URL" \
-             '.[$w] = {package: $p, version: $v, source_commit_sha: $sha, dev_run_url: $url}' \
-             "$REG/manifest.json" > "$REG/manifest.json.tmp" && mv "$REG/manifest.json.tmp" "$REG/manifest.json"
+            # step 1: provenance lookup (no git-log archaeology)
+            [ -e "$REG/$WHEEL" ] || { echo "::error::$WHEEL not in registry — cannot hotfix the $BASE line"; exit 1; }
+            local SRC; SRC="$(jq -r --arg w "$WHEEL" '.[$w].source_commit_sha // "missing"' "$REG/manifest.json")"
+            if [ "$SRC" = missing ] || [ "$SRC" = unknown ]; then
+              echo "::error::manifest has no usable source commit for $WHEEL (got $SRC)"; exit 1
+            fi
+            git cat-file -e "$SRC" || { echo "::error::manifest points at $SRC but that commit is absent"; exit 1; }
+
+            local NEW; NEW="$(next_free "$BASE")"
+            local RELBRANCH="release/$PKG-$BASE"
+
+            # step 2: cut the release branch from that line's source commit
+            if git ls-remote --exit-code -q origin "refs/heads/$RELBRANCH" >/dev/null; then
+              echo "::error::$RELBRANCH already exists on origin — the $BASE line was hotfixed before. Delete it or rerun after its patch is pinned."
+              exit 1
+            fi
+            git checkout -q -B "$RELBRANCH" "$SRC"
+
+            # step 3: cherry-pick the fix
+            pick_fix
+
+            # step 4: bump to the next free patch on THIS line
+            sed -i "s/^version = \"$BASE\"/version = \"$NEW\"/" "common/$PKG/pyproject.toml"
+            grep -q "version = \"$NEW\"" "common/$PKG/pyproject.toml" \
+              || { echo "::error::bump failed — is $BASE really the version at ${SRC:0:7}?"; exit 1; }
+            git commit -qam "hotfix: $PKG $NEW (cherry-pick ${FIX:0:7} onto $BASE)"
+            git push -q origin "HEAD:$RELBRANCH"
+
+            # step 5: build + publish from THIS branch, with a manifest entry
+            local NEWWHEEL="$PKG-$NEW-py3-none-any.whl"
+            uv build -q --wheel "common/$PKG" -o "$RUNNER_TEMP/hotfix-dist"
+            cp "$RUNNER_TEMP/hotfix-dist/$NEWWHEEL" "$REG/"
+            [ -e "$REG/$NEWWHEEL" ] || { echo "::error::build produced no $NEWWHEEL"; exit 1; }
+            local HOTFIX_SHA; HOTFIX_SHA="$(git rev-parse HEAD)"
+            jq --arg w "$NEWWHEEL" --arg p "$PKG" --arg v "$NEW" \
+               --arg sha "$HOTFIX_SHA" --arg url "$RUN_URL" \
+               '.[$w] = {package: $p, version: $v, source_commit_sha: $sha, dev_run_url: $url}' \
+               "$REG/manifest.json" > "$REG/manifest.json.tmp" && mv "$REG/manifest.json.tmp" "$REG/manifest.json"
+
+            printf -v "$__newvar" '%s' "$NEW"
+            printf -v "$__whlvar" '%s' "$NEWWHEEL"
+            echo "- \`$RELBRANCH\` cut from \`${SRC:0:7}\`, fix \`${FIX:0:7}\` picked, bumped **$BASE -> $NEW**, published \`$NEWWHEEL\`" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          echo "## hotfix: $PKG — fix \`${FIX:0:7}\` onto TWO lines" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ----- LINE 1: uat -----
+          process_line "$UAT_VER"  NEW_UAT  WHEEL_UAT
+          # ----- LINE 2: production -----
+          process_line "$PROD_VER" NEW_PROD WHEEL_PROD
+
+          # ---- publish BOTH wheels to the registry in one immutable commit --
           git -C "$REG" add -A
           git -C "$REG" -c user.name="github-actions[bot]" \
                         -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                        commit -m "publish: $NEWWHEEL (hotfix from $RELBRANCH)"
-          git -C "$REG" push origin HEAD:registry
-          echo "- :package: published \`$NEWWHEEL\` (built from \`${HOTFIX_SHA:0:7}\` on \`$RELBRANCH\`)" >> "$GITHUB_STEP_SUMMARY"
+                        commit -q -m "publish: $WHEEL_UAT + $WHEEL_PROD (hotfix $PKG, two lines)"
+          git -C "$REG" push -q origin HEAD:registry
 
-          # ---- step 6: PR re-pinning production to the patch ----------------
-          PINBRANCH="hotfix/repin-$PKG-$NEW"
-          git checkout -q -B "$PINBRANCH" origin/production
-          CHANGED=0
-          for CONSUMER in report worker; do
-            TOML="consumers/$CONSUMER/pyproject.toml"
-            if grep -q "$PKG==$FIXED" "$TOML"; then
-              sed -i "s/$PKG==$FIXED/$PKG==$NEW/" "$TOML"
-              CHANGED=1
+          # ---- step 6, twice: a re-pin PR per environment ------------------
+          open_repin_pr() { # <env> <base-ver> <new-ver> <new-wheel> <title-prefix>
+            local ENVB="$1" BASE="$2" NEW="$3" NEWWHEEL="$4" PREFIX="$5"
+            local PINBRANCH="hotfix/repin-$PKG-$NEW"
+            git checkout -q -B "$PINBRANCH" "origin/$ENVB"
+            local CHANGED=0
+            for CONSUMER in report worker; do
+              local TOML="consumers/$CONSUMER/pyproject.toml"
+              if grep -q "$PKG==$BASE" "$TOML"; then
+                sed -i "s/$PKG==$BASE/$PKG==$NEW/" "$TOML"; CHANGED=1
+              fi
+            done
+            if [ "$CHANGED" = 0 ]; then
+              echo "- :warning: no consumer on $ENVB pins \`$PKG==$BASE\` — wheel published, no PR" >> "$GITHUB_STEP_SUMMARY"
+              return
             fi
-          done
-          if [ "$CHANGED" = 0 ]; then
-            echo "- :warning: no consumer on production pins \`$PKG==$FIXED\` — wheel published, but no re-pin PR to open" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          git commit -am "hotfix: pin $PKG==$NEW on production"
-          git push origin "HEAD:$PINBRANCH"
-          gh pr create --base production --head "$PINBRANCH" \
-            --title "hotfix: pin $PKG==$NEW on production" \
-            --body "Re-pins \`$PKG==$FIXED\` -> \`$PKG==$NEW\` on production.
+            git commit -qam "hotfix: pin $PKG==$NEW on $ENVB"
+            git push -q origin "HEAD:$PINBRANCH"
+            gh pr create --base "$ENVB" --head "$PINBRANCH" \
+              --title "${PREFIX}hotfix: pin $PKG==$NEW on $ENVB" \
+              --body "Re-pins \`$PKG==$BASE\` -> \`$PKG==$NEW\` on \`$ENVB\`.
 
-          - fix: \`$FIX\` cherry-picked onto \`$RELBRANCH\` (cut from \`$SRC\`, per manifest.json)
-          - wheel: \`$NEWWHEEL\` published by [this run]($RUN_URL)
+          - fix \`$FIX\` cherry-picked onto \`release/$PKG-$BASE\` (cut from that line's source per manifest.json)
+          - wheel \`$NEWWHEEL\` published by [this run]($RUN_URL)
+          ${PREFIX:+
+          **Ordering:** merge the uat re-pin FIRST, validate, then merge this one. Convention-enforced (the pinned world has no gate); the title prefix is the reminder.}
 
-          _Opened by hotfix-pinned.yaml. If this PR shows no checks, that is the GITHUB_TOKEN teachable — see repin.yaml's header._"
-          echo "- :rocket: opened the re-pin PR against production" >> "$GITHUB_STEP_SUMMARY"
+          _Opened by hotfix-pinned.yaml. No checks on this PR? That's the GITHUB_TOKEN teachable — see repin.yaml's header._"
+            echo "- :rocket: re-pin PR opened against \`$ENVB\` ($PKG==$NEW)" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          open_repin_pr uat        "$UAT_VER"  "$NEW_UAT"  "$WHEEL_UAT"  ""
+          open_repin_pr production "$PROD_VER" "$NEW_PROD" "$WHEEL_PROD" "[merge after uat] "
+
+          # ---- make the doubled cost impossible to miss -------------------
+          {
+            echo ""
+            echo "### the tally"
+            echo "**One fix → 2 version lines ($PKG $NEW_PROD for prod, $PKG $NEW_UAT for uat) → 2 wheels published → 2 re-pin PRs.**"
+            echo ""
+            echo "Merge order: **uat ($NEW_UAT) first**, then production ($NEW_PROD) — by convention (title prefix + this note); there is no gate here."
+            echo ""
+            echo "> Contrast: the **source world** shipped the same fix as ONE cherry-pick that rode uat→production as a single commit. Here, two environments on two version lines meant minting the fix twice — the inherent cost of per-env pinned versioning."
+          } >> "$GITHUB_STEP_SUMMARY"
