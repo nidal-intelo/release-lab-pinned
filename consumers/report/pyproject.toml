@@ -4,8 +4,8 @@ version = "1.0.0"
 description = "Stand-in for report-builder"
 requires-python = ">=3.9"
 dependencies = [
-    "qb==1.6.0",
-    "solver==2.0.0",
+    "qb==1.6.10",
+    "solver==2.0.1",
 ]
 
 [build-system]
