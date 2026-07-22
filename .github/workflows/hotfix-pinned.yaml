@@ -51,8 +51,8 @@ on:
         type: choice
         options: [qb, solver]
         required: true
-      fix_commit_sha:
-        description: "commit on dev containing the fix (cherry-picked onto BOTH release lines)"
+      pr:
+        description: "dev PR number carrying the fix (cherry-picked onto BOTH release lines)"
         type: string
         required: true
 
@@ -90,12 +90,20 @@ jobs:
         run: |
           set -euo pipefail
           PKG="${{ inputs.package }}"
-          FIX="${{ inputs.fix_commit_sha }}"
+          PR="${{ inputs.pr }}"
           REG="$GITHUB_WORKSPACE/.registry-branch"
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Resolve the PR number to its merge commit — humans give a PR, not a
+          # SHA (matches the source-world hotfix + the real repo). Must be merged.
+          STATE="$(gh pr view "$PR" --json state --jq .state 2>/dev/null || echo MISSING)"
+          [ "$STATE" = MERGED ] || { echo "::error::PR #$PR is not merged (state: $STATE) — the fix must be on dev first"; exit 1; }
+          FIX="$(gh pr view "$PR" --json mergeCommit --jq '.mergeCommit.oid')"
+          [ -n "$FIX" ] && [ "$FIX" != null ] || { echo "::error::PR #$PR has no merge commit"; exit 1; }
+          echo "PR #$PR → merge commit $FIX"
 
           git cat-file -e "$FIX" || { echo "::error::fix commit $FIX not found on dev/history"; exit 1; }
 
