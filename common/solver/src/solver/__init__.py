@@ -2,7 +2,7 @@
 
 from importlib.metadata import version
 
-STRATEGY = "greedy"
+STRATEGY = "greedy + tie-break"
 
 
 def describe() -> str:

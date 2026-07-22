@@ -8,7 +8,7 @@ ROUNDING = "rounds HALF-EVEN (banker's) - query optimizer"
 # Kept well clear of ROUNDING above so a hotfix editing the note below
 # cherry-picks cleanly onto every line, whatever that line's rounding is.
 
-CART_NOTE = "BUG: off-by-one on empty carts"
+CART_NOTE = "empty carts handled correctly"
 
 
 def describe() -> str:
