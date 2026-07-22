@@ -2,18 +2,14 @@
 
 from importlib.metadata import version
 
-ROUNDING = (
-    "rounds HALF-EVEN (banker's rounding) + audit log + query cache + tweak again"
-)
+ROUNDING = "rounds HALF-EVEN (banker's)"
 
-CART_NOTE = "empty carts handled correctly"
+# --- behavior notes (identical across all version lines) ------------------
+# Kept well clear of ROUNDING above so a hotfix editing the note below
+# cherry-picks cleanly onto every line, whatever that line's rounding is.
 
-TRACE = "query trace marker: enabled"
+CART_NOTE = "BUG: off-by-one on empty carts"
 
 
 def describe() -> str:
     return f"qb {version('qb')}: {ROUNDING} ({CART_NOTE})"
-
-# demo: tweak qb behavior
-
-# hotfix: correct qb edge case (demo)
