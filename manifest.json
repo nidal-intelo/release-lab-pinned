@@ -20,8 +20,8 @@
   "qb-1.6.0-py3-none-any.whl": {
     "package": "qb",
     "version": "1.6.0",
-    "source_commit_sha": "d834bf652939d4e50339fa453d074b673b9be7f6",
-    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29688866047"
+    "source_commit_sha": "4d92d7efb62a3be578ddbe393b3f063ae03487c1",
+    "dev_run_url": "reseed-20260722"
   },
   "solver-2.0.0-py3-none-any.whl": {
     "package": "solver",
@@ -34,12 +34,6 @@
     "version": "1.6.1",
     "source_commit_sha": "7007de0b8a536ff9ef006c6a1e1ff6b301fdf654",
     "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29693190117"
-  },
-  "qb-1.3.1-py3-none-any.whl": {
-    "package": "qb",
-    "version": "1.3.1",
-    "source_commit_sha": "5d2ae5a34d648c8b88f268b5ea8c84654fddddc1",
-    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29693319871"
   },
   "qb-1.6.2-py3-none-any.whl": {
     "package": "qb",
@@ -62,8 +56,8 @@
   "qb-1.3.2-py3-none-any.whl": {
     "package": "qb",
     "version": "1.3.2",
-    "source_commit_sha": "c388bd86d763a8151b8e1e54577f50766e701487",
-    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29809075642"
+    "source_commit_sha": "35518768e66bd9f8c6ecb8944d1defd9bc852a3c",
+    "dev_run_url": "reseed-20260722"
   },
   "qb-1.6.5-py3-none-any.whl": {
     "package": "qb",
@@ -76,12 +70,6 @@
     "version": "1.6.6",
     "source_commit_sha": "9f186b670236d9ad1d08f8a1e34f4b3c5e9d0e67",
     "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29874694963"
-  },
-  "qb-1.3.3-py3-none-any.whl": {
-    "package": "qb",
-    "version": "1.3.3",
-    "source_commit_sha": "df59aedfa9b2c05f36832322b38b02ca73e0b403",
-    "dev_run_url": "https://github.com/nidal-intelo/release-lab-pinned/actions/runs/29873876248"
   },
   "qb-1.6.7-py3-none-any.whl": {
     "package": "qb",
