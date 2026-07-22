@@ -2,7 +2,7 @@
 
 from importlib.metadata import version
 
-ROUNDING = "rounds HALF-EVEN (banker's)"
+ROUNDING = "rounds HALF-EVEN (banker's) - query optimizer"
 
 # --- behavior notes (identical across all version lines) ------------------
 # Kept well clear of ROUNDING above so a hotfix editing the note below
