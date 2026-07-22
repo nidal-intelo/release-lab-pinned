@@ -30,7 +30,7 @@
 #
 # Inputs:
 #   package         — qb | solver
-#   fix_commit_sha  — a commit on dev (often a PR MERGE commit) carrying the fix
+#   pr              — the dev PR number carrying the fix (resolved to its merge commit)
 #
 # The versions to patch are AUTO-DETECTED from what uat and production
 # actually pin right now — no need to type them, and no way to fat-finger
