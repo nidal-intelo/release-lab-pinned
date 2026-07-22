@@ -2,7 +2,11 @@
 
 from importlib.metadata import version
 
-ROUNDING = "rounds HALF-EVEN (banker's rounding)"
+ROUNDING = "rounds DOWN"
+
+# --- behavior notes (identical across all version lines) ------------------
+# Kept well clear of ROUNDING above so a hotfix editing the note below
+# cherry-picks cleanly onto every line, whatever that line's rounding is.
 
 CART_NOTE = "BUG: off-by-one on empty carts"
 
