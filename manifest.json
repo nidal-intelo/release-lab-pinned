@@ -26,7 +26,7 @@
   "solver-2.0.0-py3-none-any.whl": {
     "package": "solver",
     "version": "2.0.0",
-    "source_commit_sha": "c57eee94e20f689892f5360d99daa277790f6b46",
+    "source_commit_sha": "96e3243fbf83004b71e30a35c419709229352f74",
     "dev_run_url": "unknown"
   },
   "qb-1.6.1-py3-none-any.whl": {
