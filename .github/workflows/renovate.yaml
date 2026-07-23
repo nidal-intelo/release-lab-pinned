@@ -1,0 +1,74 @@
+# renovate — self-hosted dependency-update bot. Replaces repin.yaml.
+#
+# repin.yaml hand-rolled a Renovate: it watched the `registry` branch and
+# opened ONE batched PR moving the consumer qb/solver pins forward. This runs
+# the real thing (renovatebot/github-action, self-hosted on GitHub Actions —
+# NO Mend cloud app, NO external hosting) driven by renovate.json.
+#
+# Trigger set mirrors repin.yaml exactly, plus a schedule safety net:
+#   - workflow_run after publish completes (a new wheel just landed);
+#   - workflow_dispatch (manual re-run);
+#   - schedule (fallback in case a workflow_run event is ever missed).
+#
+# ── THE SAME GITHUB_TOKEN TEACHABLE repin.yaml CARRIED ────────────────────
+# GitHub suppresses events caused by GITHUB_TOKEN: a PR Renovate opens with
+# the default token triggers NO pull_request workflows, so pr-resolve-check
+# never runs on the bot PR (it shows zero checks). The fix is the same as
+# repin's: mint a fine-grained PAT (contents:RW + pull-requests:RW), save it
+# as the repo secret LAB_BOT_PAT. The `token` below already PREFERS it and
+# falls back to GITHUB_TOKEN — add the secret and checks start firing, no
+# edit to this file required.
+
+name: renovate
+
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: "Dry run (full = compute but open no PRs)"
+        type: choice
+        default: "null"
+        options: ["null", "full"]
+  schedule:
+    - cron: "0 * * * *"      # hourly fallback; real trigger is workflow_run
+
+permissions:
+  contents: write            # push the bot/repin-consumers branch
+  pull-requests: write       # open / edit the batched PR
+
+# One Renovate at a time — two runs would race the same branch + PR.
+# (repin.yaml used concurrency group "repin" for the same reason.)
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    # workflow_run fires on failure too — only act on a green publish.
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: renovatebot/github-action@v43.0.6
+        with:
+          configurationFile: renovate.json
+          # Prefer the learner-provided PAT; fall back to the (event-
+          # suppressed) default token — identical story to repin.yaml.
+          token: ${{ secrets.LAB_BOT_PAT || github.token }}
+        env:
+          # Single-repo, self-hosted run — no autodiscovery.
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          RENOVATE_PLATFORM: github
+          # Dispatch can force a dry run; every other trigger runs for real.
+          RENOVATE_DRY_RUN: ${{ github.event.inputs.dryRun || 'null' }}
+          # Belt-and-braces: config already sets these, but a clean env keeps
+          # the run from ever waiting on an onboarding PR.
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: "optional"
+          LOG_LEVEL: debug
