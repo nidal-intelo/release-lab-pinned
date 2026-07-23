@@ -1,0 +1,94 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+
+  // ── Replaces repin.yaml (the homemade dependency-update bot). ────────────
+  // repin watched the `registry` branch and opened ONE batched PR moving
+  // consumer pins (qb / solver) forward to the newest published wheel.
+  // Renovate does the same, but the "is there a newer version?" question is
+  // answered by a customDatasource pointed at the registry's manifest.json
+  // (this sandbox has no PyPI/Artifactory), and the "what is pinned today?"
+  // question by a customManager regex over the consumer pyproject.toml files.
+
+  // Operate on dev only (repin checked out dev, based its PR on dev).
+  "baseBranchPatterns": ["dev"],
+
+  // Onboarding is unnecessary — this file IS the config.
+  "onboarding": false,
+  "requireConfig": "optional",
+
+  // Only the custom regex manager runs. Without this, Renovate's built-in
+  // pep621/poetry managers ALSO pick up qb/solver and try to resolve them
+  // against PyPI (where they don't exist) — noise and a redundant datasource.
+  // repin only ever cared about the internal pins, so we do too.
+  "enabledManagers": ["custom.regex"],
+
+  // Batched bot PR lives on bot/repin-consumers, exactly like repin.yaml.
+  "branchPrefix": "bot/",
+
+  // repin used plain commit subjects, not Conventional/semantic prefixes.
+  "semanticCommits": "disabled",
+
+  // ── DATASOURCE: enumerate published versions from the registry branch. ───
+  // manifest.json is a flat object keyed by wheel filename; each value has
+  // {package, version, source_commit_sha, dev_run_url}. We fetch the whole
+  // file once per package and keep only the releases whose .package matches
+  // the package being looked up ({{packageName}} is substituted before the
+  // jsonata runs). Newest wins under pep440 — same ordering repin got from
+  // `sort -V` on the wheel filenames.
+  "customDatasources": {
+    "pinned-registry": {
+      "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/nidal-intelo/release-lab-pinned/registry/manifest.json",
+      "format": "json",
+      "transformTemplates": [
+        "{ \"releases\": [$each($, function($v) { $v.package = \"{{packageName}}\" ? { \"version\": $v.version } })] }"
+      ]
+    }
+  },
+
+  // ── MANAGER: extract the current pin of each internal package. ───────────
+  // Matches lines like  qb==1.6.10  /  solver==2.0.0  in the consumer
+  // pyproject.toml dependency arrays. This is repin's
+  //   grep -oE "$PKG==[0-9.]+"
+  // expressed as a Renovate customManager.
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/consumers/.*/pyproject\\.toml$/"],
+      "matchStrings": [
+        "(?<depName>qb|solver)==(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "datasourceTemplate": "custom.pinned-registry",
+      "versioningTemplate": "pep440"
+    }
+  ],
+
+  // ── RULES: reproduce repin.yaml's behavior. ──────────────────────────────
+  "packageRules": [
+    {
+      "description": "Internal packages (qb, solver): one batched review PR on bot/repin-consumers, base dev. Mirrors repin.yaml — no automerge, opened for review.",
+      "matchDatasources": ["custom.pinned-registry"],
+      "matchPackageNames": ["qb", "solver"],
+      "groupName": "repin-consumers",
+      "groupSlug": "repin-consumers",
+      "commitMessagePrefix": "bot(repin):",
+      "commitMessageAction": "bump",
+      "commitMessageTopic": "consumer pins",
+      "commitMessageExtra": "to newest published wheels",
+      "automerge": false,
+      "separateMajorMinor": false,
+      "separateMinorPatch": false
+
+      // ── HOLD EXAMPLE (repin had no equivalent — this is a Renovate bonus).
+      // To freeze a package below a known-bad wheel, add allowedVersions to
+      // its own rule. e.g. to hold qb at the 1.6.x line and never move to a
+      // 2.x wheel until vetted:
+      //
+      //   {
+      //     "matchDatasources": ["custom.pinned-registry"],
+      //     "matchPackageNames": ["qb"],
+      //     "allowedVersions": "<2.0.0"
+      //   }
+    }
+  ]
+}
